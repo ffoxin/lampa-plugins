@@ -37,6 +37,8 @@ const play = async (data) => {
 }
 const stream = (index) => `http://${TS}/stream/e${index}.mkv?link=${HASH}&index=${index}&play`
 const card = { id: 7, name: 'Test <b>Show</b>', title: 'Test Show', poster_path: '/p.jpg', backdrop_path: '/b.jpg', number_of_seasons: 1 }
+// the return URLs VLC opens when playback ends: Lampa's own Infuse convention
+const back = { 'x-success': 'lampa://infuseDidFinish', 'x-error': 'lampa://infuseDidFail' }
 
 try {
     await open()
@@ -64,22 +66,31 @@ try {
     check('VLC launched through vlc-x-callback', r.launch !== null && r.launch.startsWith('vlc-x-callback://x-callback-url/stream?url='), true)
     let { url, art } = unpack(r.launch)
     check('stream URL kept intact before the fragment', url, stream(3))
-    check('artwork: poster, backdrop, title, episode', art, { poster, backdrop, title: 'Test Show', subtitle: '3 / Pilot' })
+    check('artwork: poster, backdrop, title, episode, return URLs', art, { poster, backdrop, title: 'Test Show', subtitle: '3 / Pilot', ...back })
     check("'external' listeners (tsync) get the tagged URL and still find the file index", [r.external.startsWith(stream(3) + '#lampa='), (r.external.match(/[?&]index=(\d+)/) || [])[1]], [true, '3'])
     check('playing again does not stack fragments', unpack((await play({ ...episode, url: r.external })).launch).url, stream(3))
 
     // 2. a movie: the file name is not worth a subtitle
     let movie = { url: stream(1), torrent_hash: HASH, title: 'Movie.2020.1080p.mkv', first_title: 'Test Movie', card: { id: 8, title: 'Test Movie', poster_path: '/m.jpg', backdrop_path: '/mb.jpg' } }
     r = await play(movie)
-    check('movie: title without subtitle', unpack(r.launch).art, { poster: await run(`Lampa.Api.img('/m.jpg', 'w500')`), backdrop: await run(`Lampa.Api.img('/mb.jpg', 'w1280')`), title: 'Test Movie' })
+    check('movie: title without subtitle', unpack(r.launch).art, { poster: await run(`Lampa.Api.img('/m.jpg', 'w500')`), backdrop: await run(`Lampa.Api.img('/mb.jpg', 'w1280')`), title: 'Test Movie', ...back })
 
     // 3. a card from another source carries ready image URLs
     let other = { url: stream(1), torrent_hash: HASH, title: 'x.mkv', card: { title: 'Other', poster: 'https://img.example/poster.jpg', background_image: 'https://img.example/back.jpg' } }
-    check('ready image URLs are passed as they are', unpack((await play(other)).launch).art, { poster: 'https://img.example/poster.jpg', backdrop: 'https://img.example/back.jpg', title: 'Other' })
+    check('ready image URLs are passed as they are', unpack((await play(other)).launch).art, { poster: 'https://img.example/poster.jpg', backdrop: 'https://img.example/back.jpg', title: 'Other', ...back })
 
-    // 4. nothing to show: launch URL left alone
+    // 4. nothing to show: the fragment still carries the way back
     let bare = { url: stream(2), torrent_hash: HASH, title: 'x.mkv' }
-    check('no card: plain stream URL', unpack((await play(bare)).launch), { url: stream(2), art: null })
+    let bareLaunch = unpack((await play(bare)).launch)
+    check('no card: stream URL with only the return URLs', { url: bareLaunch.url, keys: Object.keys(bareLaunch.art).filter((k) => k !== 'title').sort(), back: { 'x-success': bareLaunch.art['x-success'], 'x-error': bareLaunch.art['x-error'] } }, { url: stream(2), keys: ['x-error', 'x-success'], back })
+
+    // 4b. the client's own URL scheme, as Lampa's Infuse template reads it; junk falls back to lampa://
+    for (let [stored, scheme] of [['lampamx', 'lampamx'], ['undefined', 'lampa'], ['', 'lampa'], ['not a scheme', 'lampa']]) {
+        await run(`Lampa.Storage.set('apple_tv_client', ${JSON.stringify(stored)})`)
+        let art = unpack((await play(bare)).launch).art
+        check(`apple_tv_client ${JSON.stringify(stored)}: return URLs use ${scheme}://`, [art['x-success'], art['x-error']], [`${scheme}://infuseDidFinish`, `${scheme}://infuseDidFail`])
+    }
+    await run(`localStorage.removeItem('apple_tv_client')`)
 
     // 5. 'create' alone for an online (non-torrent) source, with the quality list Lampa swaps in
     let online = await run(`(()=>{

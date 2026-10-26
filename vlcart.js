@@ -1,12 +1,14 @@
 /*
- * Movie artwork for VLC on Apple TV.
+ * Movie artwork and the way back for VLC on Apple TV.
  *
  * While VLC opens a stream it shows its cone on a blurred copy of itself until the first video
- * frame arrives. The VLC build patched for Lampa (branch lampa-tvos-fixes) can show the movie's
- * backdrop and poster with its title instead, but Lampa's VLC launch URL carries only the stream
- * URL and a plugin cannot change that template. So the artwork rides on the stream URL itself as
- * a fragment, #lampa=<JSON>: a fragment never leaves the client, TorrServer never sees it, and
- * VLC strips it before playing.
+ * frame arrives, and once playback ends it leaves the viewer in its own menu. The VLC build
+ * patched for Lampa (branch lampa-tvos-fixes) can show the movie's backdrop and poster with its
+ * title instead, and return to Lampa through an x-callback return URL, but Lampa's VLC launch URL
+ * carries only the stream URL and a plugin cannot change that template. So both ride on the
+ * stream URL itself as a fragment, #lampa=<JSON>: a fragment never leaves the client, TorrServer
+ * never sees it, and VLC strips it before playing. The return URLs are the ones Lampa's own Infuse
+ * template uses, <apple_tv_client>://infuseDidFinish and ://infuseDidFail.
  *
  * Only Apple TV with VLC chosen as the player. The fragment is removed again before Lampa's own
  * player is used.
@@ -68,7 +70,22 @@
         // series: the episode line as Lampa lists it; for a movie data.title is only the file name
         if ((data.episode || data.season) && subtitle && subtitle !== title) art.subtitle = subtitle;
 
-        return art.poster || art.backdrop ? art : null;
+        return art;
+    }
+
+    // the URL scheme of Lampa's Apple TV client, the field Lampa's Infuse template reads
+    // (Params.field turns an unset one into the string 'undefined')
+    function client() {
+        var scheme = Lampa.Storage.field('apple_tv_client');
+
+        return scheme !== 'undefined' && /^[a-z][a-z0-9+.-]*$/i.test(scheme) ? scheme : 'lampa';
+    }
+
+    // VLC opens these when playback ends or fails, which brings Lampa back to the front
+    function callbacks() {
+        var scheme = client();
+
+        return { 'x-success': scheme + '://infuseDidFinish', 'x-error': scheme + '://infuseDidFail' };
     }
 
     Lampa.Player.listener.follow('create', function (e) {
@@ -78,8 +95,11 @@
         if (/youtube\.com|youtu\.be/.test(data.url)) return; // Lampa plays those itself
 
         var art = artwork(data);
+        var back = callbacks();
 
-        if (art) each(data, function (url) { return tag(url, art); });
+        for (var key in back) art[key] = back[key];
+
+        each(data, function (url) { return tag(url, art); });
     });
 
     // Lampa's own player (for example "play in Lampa" from the menu) gets the plain URL back
