@@ -7,8 +7,10 @@
  * title instead, and return to Lampa through an x-callback return URL, but Lampa's VLC launch URL
  * carries only the stream URL and a plugin cannot change that template. So both ride on the
  * stream URL itself as a fragment, #lampa=<JSON>: a fragment never leaves the client, TorrServer
- * never sees it, and VLC strips it before playing. The return URLs are the ones Lampa's own Infuse
- * template uses, <apple_tv_client>://infuseDidFinish and ://infuseDidFail.
+ * never sees it, and VLC strips it before playing. The return URL is the one Lampa's own Infuse
+ * template uses, <apple_tv_client>://infuseDidFinish; no x-error, because the Lampa client answers
+ * ://infuseDidFail with an "Infuse failed to play this video" alert while VLC has already shown
+ * its own, so after an error VLC comes back the same way.
  *
  * Only Apple TV with VLC chosen as the player. The fragment is removed again before Lampa's own
  * player is used.
@@ -81,11 +83,10 @@
         return scheme !== 'undefined' && /^[a-z][a-z0-9+.-]*$/i.test(scheme) ? scheme : 'lampa';
     }
 
-    // VLC opens these when playback ends or fails, which brings Lampa back to the front
+    // VLC opens this when playback ends (or, after its own error dialog, fails), which brings
+    // Lampa back to the front
     function callbacks() {
-        var scheme = client();
-
-        return { 'x-success': scheme + '://infuseDidFinish', 'x-error': scheme + '://infuseDidFail' };
+        return { 'x-success': client() + '://infuseDidFinish' };
     }
 
     Lampa.Player.listener.follow('create', function (e) {
