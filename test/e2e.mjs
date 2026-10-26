@@ -7,30 +7,9 @@
 // after the page is frozen and resumed like it is while VLC plays.
 
 import http from 'node:http'
-import fs from 'node:fs'
-import path from 'node:path'
-import os from 'node:os'
-import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { launch, listen, sleep, report } from './harness.mjs'
 
-const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const lampa = path.resolve(process.argv[2] || path.join(root, '..', 'lampa'))
-const chromeBin = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const HASH = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2'
-
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' }
-
-// --- static server for the Lampa build and the plugin -------------------------------------
-
-const app = http.createServer((req, res) => {
-    let url = decodeURIComponent(req.url.split('?')[0])
-    let file = url === '/tsync.js' ? path.join(root, 'tsync.js') : path.join(lampa, url === '/' ? 'index.html' : url)
-
-    fs.readFile(file, (err, data) => {
-        if (err) return res.writeHead(404).end()
-        res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream' }).end(data)
-    })
-})
 
 // --- fake TorrServer ----------------------------------------------------------------------
 
@@ -54,82 +33,11 @@ const torrserver = http.createServer((req, res) => {
     })
 })
 
-const listen = (server) => new Promise((ok) => server.listen(0, '127.0.0.1', () => ok(server.address().port)))
-const appPort = await listen(app)
 const tsPort = await listen(torrserver)
-
-// --- headless Chrome over the DevTools protocol -------------------------------------------
-
-const profile = fs.mkdtempSync(path.join(process.env.CLAUDE_JOB_DIR ? path.join(process.env.CLAUDE_JOB_DIR, 'tmp') : os.tmpdir(), 'tsync-chrome-'))
-const chrome = spawn(chromeBin, ['--headless=new', '--remote-debugging-port=0', '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] })
-
-const wsUrl = await new Promise((ok, fail) => {
-    let log = ''
-    chrome.stderr.on('data', (d) => {
-        log += d
-        let m = log.match(/DevTools listening on (ws:\S+)/)
-        if (m) ok(m[1])
-    })
-    chrome.on('exit', () => fail(new Error('chrome exited:\n' + log)))
-})
-
-const port = new URL(wsUrl).port
-const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((t) => t.type === 'page')
-const ws = new WebSocket(page.webSocketDebuggerUrl)
-await new Promise((ok) => ws.addEventListener('open', ok))
-
-let seq = 0
-const pending = new Map()
-const consoleLog = []
-ws.addEventListener('message', (e) => {
-    let msg = JSON.parse(e.data)
-    if (msg.method === 'Runtime.consoleAPICalled') consoleLog.push(msg.params.type + ' ' + msg.params.args.map((a) => a.value ?? a.description).join(' '))
-    if (msg.method === 'Runtime.exceptionThrown') consoleLog.push('exception ' + (msg.params.exceptionDetails.exception?.description || msg.params.exceptionDetails.text))
-    if (msg.id && pending.has(msg.id)) {
-        let { ok, fail } = pending.get(msg.id)
-        pending.delete(msg.id)
-        msg.error ? fail(new Error(msg.error.message)) : ok(msg.result)
-    }
-})
-const send = (method, params = {}) => new Promise((ok, fail) => {
-    let id = ++seq
-    pending.set(id, { ok, fail })
-    ws.send(JSON.stringify({ id, method, params }))
-})
-const run = async (expression) => {
-    let r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
-    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text)
-    return r.result.value
-}
-const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms))
-const waitFor = async (expression, ms = 30000) => {
-    for (let end = Date.now() + ms; Date.now() < end; await sleep(200)) {
-        if (await run(expression).catch(() => false)) return
-    }
-    console.log(consoleLog.slice(-40).join('\n'))
-    throw new Error('timed out waiting for ' + expression)
-}
-
-// --- checks -------------------------------------------------------------------------------
-
-let failures = 0
-const check = (name, actual, expected) => {
-    let ok = JSON.stringify(actual) === JSON.stringify(expected)
-    if (!ok) failures++
-    console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${ok ? '' : `: got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)}`}`)
-}
-
-const iPad = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+const { send, run, check, open, plugin, close, failed } = await launch({ '/tsync.js': new URL('../tsync.js', import.meta.url).pathname })
 
 try {
-    await send('Page.enable')
-    await send('Runtime.enable')
-    await send('Emulation.setUserAgentOverride', { userAgent: iPad })
-    await send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false })
-    // skip the first-run language picker
-    await send('Page.addScriptToEvaluateOnNewDocument', { source: `localStorage.getItem('language') || localStorage.setItem('language', 'ru')` })
-    await send('Page.navigate', { url: `http://127.0.0.1:${appPort}/` })
-    await waitFor('!!(window.Lampa && Lampa.Timeline && Lampa.Player && window.appready)', 40000)
+    await open()
 
     check('Lampa detects Apple TV', await run(`Lampa.Platform.is('apple_tv')`), true)
 
@@ -140,7 +48,7 @@ try {
         Lampa.Storage.set('player_torrent', 'vlc')
     })()`)
 
-    await run(`new Promise((ok, fail) => Lampa.Utils.putScriptAsync(['http://127.0.0.1:${appPort}/tsync.js'], ok, fail))`)
+    await plugin('/tsync.js')
     check('plugin loaded', await run('window.tsync_plugin'), true)
 
     // a two-episode torrent shaped like the elements torrent.js passes to Player.play
@@ -229,12 +137,8 @@ try {
         check(`${name}: no request, bar unchanged`, [viewedCalls - before, await bar(1)], [0, '88%'])
     }
 } finally {
-    ws.close()
-    chrome.kill()
-    app.close()
+    close()
     torrserver.close()
-    setTimeout(() => fs.rmSync(profile, { recursive: true, force: true }), 500)
 }
 
-console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed')
-process.exitCode = failures ? 1 : 0
+report(failed())
